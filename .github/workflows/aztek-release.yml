@@ -1,0 +1,84 @@
+# mGear for Aztek: the plug-ins built with Aztek's plug-in kit on Linux, Windows and macOS, packed with mGear's scripts
+# as a module (aztek/package.py), and published as a release that Aztek's Help > Install mGear downloads.
+#
+# Run it from the Actions tab (Run workflow), giving the Aztek commit or tag whose devkit to build with.
+name: Aztek release
+
+on:
+  workflow_dispatch:
+    inputs:
+      aztek_ref:
+        description: Aztek commit, tag or branch to build with
+        default: main
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux-x64
+          - os: windows-2022
+            platform: windows-x64
+          - os: macos-14
+            platform: macos
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: srlegrand/Aztek
+          ref: ${{ inputs.aztek_ref }}
+          path: aztek-src
+          sparse-checkout: devkit
+      - name: Configure
+        shell: bash
+        run: |
+          args=(-S aztek -B build-aztek "-DAZTEK_DEVKIT:PATH=aztek-src/devkit" -DCMAKE_BUILD_TYPE=Release)
+          if [ "${{ matrix.platform }}" = macos ]; then args+=("-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64"); fi
+          cmake "${args[@]}"
+      - name: Build
+        run: cmake --build build-aztek --config Release
+      - name: Package
+        run: python aztek/package.py --plugins build-aztek/plug-ins --devkit aztek-src/devkit --platform ${{ matrix.platform }} --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: dist/*.zip
+
+  release:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: srlegrand/Aztek
+          ref: ${{ inputs.aztek_ref }}
+          path: aztek-src
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(python -c "import re;print('.'.join(re.search(r'^VERSION\s*=\s*\[(\d+),\s*(\d+),\s*(\d+)\]', open('release/scripts/mgear/__init__.py').read(), re.M).groups()))")
+          abi=$(sed -n 's/^#define AZTEK_ABI_VERSION \([0-9]*\).*/\1/p' aztek-src/devkit/include/aztek/abi.h)
+          commit=$(git -C aztek-src rev-parse --short HEAD)
+          count=$(git -C aztek-src rev-list --count HEAD)
+          tag="v${version}-aztek-abi${abi}"
+          notes="mGear ${version} for Aztek (plug-in ABI ${abi}), built with the devkit of Aztek 2.${count} (${commit}). Install it from Aztek's Help > Install mGear."
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/*.zip --clobber
+            gh release edit "$tag" --notes "$notes"
+          else
+            gh release create "$tag" dist/*.zip --title "mGear ${version} for Aztek" --notes "$notes" --target "$GITHUB_SHA"
+          fi
